@@ -6,6 +6,8 @@ import httpx
 import os
 import tempfile
 import re
+import subprocess
+import shutil
 from pathlib import Path
 from app.core.sse import sse_event, sse_error
 from app.core.config import settings
@@ -16,6 +18,29 @@ from .transcriber import transcribe_audio
 from .viral_detector import detect_viral_moments
 from .clipper import create_clips_from_moments
 from .caption_generator import generate_captions_for_clips
+
+
+def _check_dependencies() -> tuple[bool, list[str]]:
+    """
+    Verify all required system dependencies are installed.
+    
+    Returns:
+        (success: bool, missing: list[str])
+    """
+    deps = {
+        "yt-dlp": ["yt-dlp", "--version"],
+        "ffmpeg": ["ffmpeg", "-version"],
+        "ffprobe": ["ffprobe", "-version"]
+    }
+    
+    missing = []
+    for name, cmd in deps.items():
+        try:
+            subprocess.run(cmd, capture_output=True, check=True, timeout=5)
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            missing.append(name)
+    
+    return (len(missing) == 0, missing)
 
 
 async def execute(prompt: str, keys: dict, language: str = None, options: dict = None):
@@ -49,6 +74,15 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
         SSE events with status updates and final clips
     """
     try:
+        # Check system dependencies first
+        deps_ok, missing_deps = _check_dependencies()
+        if not deps_ok:
+            yield sse_error(
+                f"Missing required system dependencies: {', '.join(missing_deps)}. "
+                f"Please contact the marketplace administrator to install these packages."
+            )
+            return
+        
         # Extract API keys
         openai_api_key = keys.get("OPENAI_API_KEY")
         whisper_key = keys.get("OPENAI_WHISPER_KEY", openai_api_key)  # Fallback to same key
@@ -61,14 +95,36 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
             yield sse_error("OPENAI_WHISPER_KEY missing (required for transcription)")
             return
         
-        # Extract options
+        # Extract and validate options
         opts = options or {}
+        
+        # Validate num_clips (1-10)
         num_clips = opts.get("num_clips", 3)
+        num_clips = max(1, min(num_clips, 10))  # Clamp to valid range
+        
+        # Validate durations (10-180 seconds)
         max_duration = opts.get("max_duration", 60)
+        max_duration = max(10, min(max_duration, 180))
+        
         min_duration = opts.get("min_duration", 15)
+        min_duration = max(5, min(min_duration, 120))
+        
+        # Ensure min < max
+        if min_duration >= max_duration:
+            yield sse_error(f"min_duration ({min_duration}s) must be less than max_duration ({max_duration}s)")
+            return
+        
+        # Validate aspect ratio
         aspect_ratio = opts.get("aspect_ratio", "9:16")
+        if aspect_ratio not in ["9:16", "1:1", "16:9"]:
+            yield sse_error(f"Invalid aspect_ratio '{aspect_ratio}'. Must be '9:16', '1:1', or '16:9'")
+            return
+        
         add_captions = opts.get("add_captions", True)
+        
+        # Validate virality threshold (1.0-10.0)
         virality_threshold = opts.get("virality_threshold", 7.0)
+        virality_threshold = max(1.0, min(virality_threshold, 10.0))
         
         # Extract video URL from prompt
         video_url = _extract_url(prompt)
@@ -159,7 +215,13 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                             transcript
                         )
                         clips = clips_with_captions
-                        yield sse_event("status", "✅ Captions added to all clips")
+                        
+                        # Report per-clip caption success
+                        success_count = sum(1 for c in clips if c.get("has_captions", False))
+                        if success_count == len(clips):
+                            yield sse_event("status", f"✅ Captions added to all {len(clips)} clips")
+                        else:
+                            yield sse_event("status", f"✅ Captions added to {success_count}/{len(clips)} clips")
                     except Exception as e:
                         # Non-fatal, continue without captions
                         yield sse_event("status", f"⚠️ Caption generation failed, continuing without: {str(e)}")

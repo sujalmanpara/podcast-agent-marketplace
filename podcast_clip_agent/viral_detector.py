@@ -155,7 +155,7 @@ def _format_time(seconds: float) -> str:
 
 
 def _parse_llm_response(text: str) -> list:
-    """Parse LLM JSON response, handling markdown code blocks."""
+    """Parse LLM JSON response, handling markdown code blocks and mixed content."""
     # Remove markdown code blocks if present
     text = text.strip()
     if text.startswith("```"):
@@ -173,11 +173,27 @@ def _parse_llm_response(text: str) -> list:
         
         text = "\n".join(json_lines).strip()
     
-    # Parse JSON
+    # Try direct JSON parsing first
     try:
         moments = json.loads(text)
         if not isinstance(moments, list):
             raise ValueError("Response is not a JSON array")
         return moments
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse LLM response as JSON: {str(e)}")
+    except json.JSONDecodeError:
+        # Fallback: Try to extract JSON array from mixed text
+        import re
+        json_match = re.search(r'\[.*\]', text, re.DOTALL)
+        if json_match:
+            try:
+                moments = json.loads(json_match.group(0))
+                if isinstance(moments, list):
+                    return moments
+            except json.JSONDecodeError:
+                pass
+        
+        # Last resort: show preview of what LLM returned
+        preview = text[:200] + "..." if len(text) > 200 else text
+        raise RuntimeError(
+            f"LLM returned invalid JSON. Response preview: {preview}\n\n"
+            f"Expected JSON array format: [{{'start_time': ..., 'end_time': ..., ...}}]"
+        )

@@ -5,6 +5,7 @@ Uses transcript timestamps to generate SRT files and burns them into video
 import httpx
 import subprocess
 import os
+import shlex
 from pathlib import Path
 
 
@@ -136,8 +137,9 @@ def _burn_captions(video_file: str, srt_file: str, output_file: str):
         srt_file: SRT subtitle file path
         output_file: Output video path with captions
     """
-    # Escape SRT path for FFmpeg (handle spaces and special chars)
-    escaped_srt = srt_file.replace('\\', '/').replace(':', '\\:').replace("'", "'\\\\\\''")
+    # Escape SRT path for FFmpeg using shlex (secure against command injection)
+    # Convert to absolute path and properly quote
+    abs_srt_path = os.path.abspath(srt_file)
     
     # Subtitle style (white text, black outline, bottom-center)
     style = (
@@ -146,7 +148,9 @@ def _burn_captions(video_file: str, srt_file: str, output_file: str):
         "Shadow=0,MarginV=40,Alignment=2"
     )
     
-    vf = f"subtitles='{escaped_srt}':force_style='{style}'"
+    # Use shlex.quote for safe path escaping
+    escaped_srt = shlex.quote(abs_srt_path)
+    vf = f"subtitles={escaped_srt}:force_style='{style}'"
     
     cmd = [
         "ffmpeg", "-y",

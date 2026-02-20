@@ -1,0 +1,25 @@
+{
+  "id": "podcast-clip-agent",
+  "name": "Podcast Clip Generator",
+  "description": "Convert long-form podcasts into viral short-form clips with AI-powered scene detection and captions. Supports YouTube, video files, and audio files.",
+  "version": "2.0.0",
+  "author": "Sam (@sujalmanpara)",
+  "category": "content-creation",
+  "tags": ["podcast", "video-editing", "clips", "viral-content", "youtube", "ai-captions"],
+  "requiredEnv": [
+    "OPENAI_API_KEY",
+    "OPENAI_WHISPER_KEY"
+  ],
+  "trigger": [
+    "podcast clip",
+    "create clips",
+    "viral clips",
+    "short clips from",
+    "clip this video",
+    "extract clips"
+  ],
+  "timeout": 300,
+  "maxConcurrency": 1,
+  "supportsHumanInLoop": false,
+  "enabled": true
+}

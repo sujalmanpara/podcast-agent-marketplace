@@ -90,7 +90,7 @@ Only include clips with score >= {threshold}/10."""
             json={
                 "model": "gpt-4o-mini",
                 "temperature": 0.3,
-                "max_tokens": 2000,
+                "max_tokens": 16000,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

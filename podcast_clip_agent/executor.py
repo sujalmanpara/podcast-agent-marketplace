@@ -1,18 +1,20 @@
 """
 Podcast Clip Agent - Executor
 Converts long-form podcasts into viral short-form clips with AI.
+Entry point: execute() — follows Nextbase marketplace async generator pattern.
 """
+import asyncio
 import httpx
 import os
-import tempfile
 import re
 import subprocess
-import shutil
+import tempfile
 from pathlib import Path
+
 from app.core.sse import sse_event, sse_error
 from app.core.config import settings
 
-# Import agent-specific modules
+# Agent-specific modules
 from .downloader import download_video
 from .transcriber import transcribe_audio
 from .viral_detector import detect_viral_moments
@@ -20,154 +22,190 @@ from .clipper import create_clips_from_moments
 from .caption_generator import generate_captions_for_clips
 
 
+# ---------------------------------------------------------------------------
+# Dependency check
+# ---------------------------------------------------------------------------
+
 def _check_dependencies() -> tuple[bool, list[str]]:
     """
     Verify all required system dependencies are installed.
-    
+
     Returns:
-        (success: bool, missing: list[str])
+        (all_ok: bool, missing: list[str])
     """
     deps = {
         "yt-dlp": ["yt-dlp", "--version"],
-        "ffmpeg": ["ffmpeg", "-version"],
-        "ffprobe": ["ffprobe", "-version"]
+        "ffmpeg":  ["ffmpeg",  "-version"],
+        "ffprobe": ["ffprobe", "-version"],
     }
-    
+
     missing = []
     for name, cmd in deps.items():
         try:
             subprocess.run(cmd, capture_output=True, check=True, timeout=5)
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             missing.append(name)
-    
+
     return (len(missing) == 0, missing)
 
+
+# ---------------------------------------------------------------------------
+# URL extraction
+# ---------------------------------------------------------------------------
+
+def _extract_url(text: str) -> str | None:
+    """
+    Extract a video URL from free-form text.
+
+    Supports:
+      - youtube.com/watch?v=ID
+      - youtu.be/ID
+      - youtube.com/shorts/ID
+      - youtube.com/live/ID
+      - m.youtube.com/...
+      - Direct video file URLs (.mp4, .webm, .mkv, .avi, .mov, .m4v)
+    """
+    # Covers watch, shorts, live, embed, and youtu.be short links
+    youtube_pattern = (
+        r'(?:https?://)?'
+        r'(?:www\.|m\.)?'
+        r'(?:'
+            r'youtube\.com/(?:watch\?v=|shorts/|live/|embed/)'
+            r'|youtu\.be/'
+        r')'
+        r'([\w\-]{11})'          # YouTube video IDs are always 11 chars
+    )
+
+    match = re.search(youtube_pattern, text, re.IGNORECASE)
+    if match:
+        video_id = match.group(1)
+        return f"https://www.youtube.com/watch?v={video_id}"
+
+    # Direct video file URL
+    direct_pattern = r'https?://[^\s]+\.(?:mp4|webm|mkv|avi|mov|m4v)(?:\?[^\s]*)?'
+    match = re.search(direct_pattern, text, re.IGNORECASE)
+    if match:
+        return match.group(0)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main executor
+# ---------------------------------------------------------------------------
 
 async def execute(prompt: str, keys: dict, language: str = None, options: dict = None):
     """
     Main executor for Podcast Clip Agent.
-    
+
     Args:
-        prompt: User's request with video URL
-            Examples:
-            - "Create clips from https://youtube.com/watch?v=..."
-            - "Generate viral clips from this podcast: [URL]"
-            - "Extract 3 best moments from [URL]"
-        
+        prompt: User's request containing a video URL, e.g.:
+                "Create 3 viral clips from https://youtu.be/dQw4w9WgXcQ"
+
         keys: {
-            "OPENAI_API_KEY": "sk-...",      # For viral moment detection
-            "OPENAI_WHISPER_KEY": "sk-..."   # For transcription (can be same key)
+            "OPENAI_API_KEY":    "sk-...",   # viral moment detection
+            "OPENAI_WHISPER_KEY": "sk-..."   # transcription (may be same key)
         }
-        
-        language: "en", "es", etc. (for transcript language hint)
-        
+
+        language: ISO-639-1 code ("en", "es", ...) — optional Whisper hint
+
         options: {
-            "num_clips": 3,                    # Number of clips to create (default: 3)
-            "max_duration": 60,                # Max clip duration in seconds (default: 60)
-            "min_duration": 15,                # Min clip duration in seconds (default: 15)
-            "aspect_ratio": "9:16",            # "9:16" (vertical) or "1:1" (square)
-            "add_captions": true,              # Add AI-generated captions (default: true)
-            "virality_threshold": 7.0          # Min score 1-10 (default: 7.0)
+            "num_clips":          3,      # 1-10
+            "max_duration":       60,     # seconds (10-180)
+            "min_duration":       15,     # seconds (5-120)
+            "aspect_ratio":       "9:16", # "9:16" | "1:1" | "16:9"
+            "add_captions":       true,
+            "virality_threshold": 7.0     # 1.0-10.0
         }
-    
+
     Yields:
-        SSE events with status updates and final clips
+        SSE events with status updates and final result payload
     """
     try:
-        # Check system dependencies first
+        # ── Dependency check ──────────────────────────────────────────────
         deps_ok, missing_deps = _check_dependencies()
         if not deps_ok:
             yield sse_error(
                 f"Missing required system dependencies: {', '.join(missing_deps)}. "
-                f"Please contact the marketplace administrator to install these packages."
+                "Please ask the marketplace administrator to install them."
             )
             return
-        
-        # Extract API keys
+
+        # ── API keys ──────────────────────────────────────────────────────
         openai_api_key = keys.get("OPENAI_API_KEY")
-        whisper_key = keys.get("OPENAI_WHISPER_KEY", openai_api_key)  # Fallback to same key
-        
+        whisper_key    = keys.get("OPENAI_WHISPER_KEY", openai_api_key)
+
         if not openai_api_key:
-            yield sse_error("OPENAI_API_KEY missing (required for viral moment detection)")
+            yield sse_error("OPENAI_API_KEY is required for viral moment detection.")
             return
-        
         if not whisper_key:
-            yield sse_error("OPENAI_WHISPER_KEY missing (required for transcription)")
+            yield sse_error("OPENAI_WHISPER_KEY is required for transcription.")
             return
-        
-        # Extract and validate options
+
+        # ── Options validation ────────────────────────────────────────────
         opts = options or {}
-        
-        # Validate num_clips (1-10)
-        num_clips = opts.get("num_clips", 3)
-        num_clips = max(1, min(num_clips, 10))  # Clamp to valid range
-        
-        # Validate durations (10-180 seconds)
-        max_duration = opts.get("max_duration", 60)
-        max_duration = max(10, min(max_duration, 180))
-        
-        min_duration = opts.get("min_duration", 15)
-        min_duration = max(5, min(min_duration, 120))
-        
-        # Ensure min < max
+
+        num_clips = max(1, min(int(opts.get("num_clips", 3)), 10))
+
+        max_duration = max(10,  min(int(opts.get("max_duration", 60)),  180))
+        min_duration = max(5,   min(int(opts.get("min_duration", 15)),  120))
+
         if min_duration >= max_duration:
-            yield sse_error(f"min_duration ({min_duration}s) must be less than max_duration ({max_duration}s)")
+            yield sse_error(
+                f"min_duration ({min_duration}s) must be less than max_duration ({max_duration}s)."
+            )
             return
-        
-        # Validate aspect ratio
+
         aspect_ratio = opts.get("aspect_ratio", "9:16")
-        if aspect_ratio not in ["9:16", "1:1", "16:9"]:
-            yield sse_error(f"Invalid aspect_ratio '{aspect_ratio}'. Must be '9:16', '1:1', or '16:9'")
+        if aspect_ratio not in ("9:16", "1:1", "16:9"):
+            yield sse_error(
+                f"Invalid aspect_ratio '{aspect_ratio}'. Must be '9:16', '1:1', or '16:9'."
+            )
             return
-        
-        add_captions = opts.get("add_captions", True)
-        
-        # Validate virality threshold (1.0-10.0)
-        virality_threshold = opts.get("virality_threshold", 7.0)
-        virality_threshold = max(1.0, min(virality_threshold, 10.0))
-        
-        # Extract video URL from prompt
+
+        add_captions        = bool(opts.get("add_captions", True))
+        virality_threshold  = max(1.0, min(float(opts.get("virality_threshold", 7.0)), 10.0))
+
+        # ── URL extraction ────────────────────────────────────────────────
         video_url = _extract_url(prompt)
         if not video_url:
-            yield sse_error("No video URL found in prompt. Provide YouTube link or direct video URL.")
+            yield sse_error(
+                "No video URL found in prompt. "
+                "Provide a YouTube link (watch, shorts, live) or a direct video URL."
+            )
             return
-        
+
         yield sse_event("status", f"🎬 Found video: {video_url}")
-        
-        # Create temp directory for processing
+
+        # ── Pipeline ──────────────────────────────────────────────────────
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            
-            # Step 1: Download video
-            yield sse_event("status", "⬇️ Downloading video... (this may take 1-2 minutes)")
-            
+
             async with httpx.AsyncClient(timeout=300) as client:
+
+                # Step 1 — Download
+                yield sse_event("status", "⬇️ Downloading video… (1-2 min)")
                 try:
-                    video_file = await download_video(client, video_url, str(temp_path))
+                    video_file = await download_video(video_url, str(temp_path))
                     yield sse_event("status", f"✅ Downloaded: {Path(video_file).name}")
                 except Exception as e:
-                    yield sse_error(f"Download failed: {str(e)}")
+                    yield sse_error(f"Download failed: {e}")
                     return
-                
-                # Step 2: Transcribe audio
-                yield sse_event("status", "🎤 Transcribing audio with Whisper... (1-3 minutes)")
-                
+
+                # Step 2 — Transcribe
+                yield sse_event("status", "🎤 Transcribing audio with Whisper… (1-3 min)")
                 try:
                     transcript = await transcribe_audio(
-                        client,
-                        whisper_key,
-                        video_file,
-                        language=language
+                        client, whisper_key, video_file, language=language
                     )
                     word_count = len(transcript.get("text", "").split())
                     yield sse_event("status", f"✅ Transcription complete ({word_count} words)")
                 except Exception as e:
-                    yield sse_error(f"Transcription failed: {str(e)}")
+                    yield sse_error(f"Transcription failed: {e}")
                     return
-                
-                # Step 3: Detect viral moments with LLM
-                yield sse_event("status", f"🤖 Analyzing transcript for top {num_clips} viral moments...")
-                
+
+                # Step 3 — Viral detection
+                yield sse_event("status", f"🤖 Analysing transcript for top {num_clips} viral moments…")
                 try:
                     viral_moments = await detect_viral_moments(
                         client,
@@ -178,19 +216,19 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                         max_duration=max_duration,
                         threshold=virality_threshold
                     )
-                    
                     if not viral_moments:
-                        yield sse_error("No viral moments found. Try lowering virality_threshold or processing a different video.")
+                        yield sse_error(
+                            "No viral moments found. "
+                            "Try lowering virality_threshold or use a different video."
+                        )
                         return
-                    
                     yield sse_event("status", f"✅ Found {len(viral_moments)} viral moments")
                 except Exception as e:
-                    yield sse_error(f"Viral detection failed: {str(e)}")
+                    yield sse_error(f"Viral detection failed: {e}")
                     return
-                
-                # Step 4: Create video clips
-                yield sse_event("status", f"✂️ Creating {len(viral_moments)} video clips...")
-                
+
+                # Step 4 — Create clips (parallel)
+                yield sse_event("status", f"✂️ Creating {len(viral_moments)} video clips in parallel…")
                 try:
                     clips = await create_clips_from_moments(
                         video_file,
@@ -200,66 +238,33 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                     )
                     yield sse_event("status", f"✅ Created {len(clips)} clips")
                 except Exception as e:
-                    yield sse_error(f"Clip creation failed: {str(e)}")
+                    yield sse_error(f"Clip creation failed: {e}")
                     return
-                
-                # Step 5: Add captions (optional)
+
+                # Step 5 — Captions (parallel, optional, non-fatal)
                 if add_captions:
-                    yield sse_event("status", "📝 Generating AI captions for clips...")
-                    
+                    yield sse_event("status", "📝 Generating & burning captions in parallel…")
                     try:
-                        clips_with_captions = await generate_captions_for_clips(
-                            client,
-                            openai_api_key,
-                            clips,
-                            transcript
+                        clips = await generate_captions_for_clips(
+                            client, openai_api_key, clips, transcript
                         )
-                        clips = clips_with_captions
-                        
-                        # Report per-clip caption success
-                        success_count = sum(1 for c in clips if c.get("has_captions", False))
-                        if success_count == len(clips):
+                        ok = sum(1 for c in clips if c.get("has_captions"))
+                        if ok == len(clips):
                             yield sse_event("status", f"✅ Captions added to all {len(clips)} clips")
                         else:
-                            yield sse_event("status", f"✅ Captions added to {success_count}/{len(clips)} clips")
+                            yield sse_event("status", f"⚠️ Captions added to {ok}/{len(clips)} clips")
                     except Exception as e:
-                        # Non-fatal, continue without captions
-                        yield sse_event("status", f"⚠️ Caption generation failed, continuing without: {str(e)}")
-                
-                # Step 6: Return final result
-                result = {
-                    "success": True,
+                        yield sse_event("status", f"⚠️ Caption step failed, skipping: {e}")
+
+                # Step 6 — Final result
+                yield sse_event("result", {
+                    "success":   True,
                     "video_url": video_url,
                     "num_clips": len(clips),
-                    "clips": clips,
-                    "message": f"✅ Successfully created {len(clips)} viral clips!",
-                    "note": "Clips are temporary. Download them within 1 hour or they'll be deleted."
-                }
-                
-                yield sse_event("result", result)
-    
+                    "clips":     clips,
+                    "message":   f"✅ Successfully created {len(clips)} viral clips!",
+                    "note":      "Clips are temporary — download within 1 hour."
+                })
+
     except Exception as e:
-        yield sse_error(f"Podcast clip agent error: {str(e)}")
-
-
-def _extract_url(text: str) -> str:
-    """Extract video URL from text."""
-    # YouTube patterns
-    youtube_patterns = [
-        r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([\w\-]+)',
-        r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([\w\-]+)',
-    ]
-    
-    for pattern in youtube_patterns:
-        match = re.search(pattern, text)
-        if match:
-            video_id = match.group(1)
-            return f"https://www.youtube.com/watch?v={video_id}"
-    
-    # Generic URL pattern (direct video file)
-    url_pattern = r'https?://[^\s]+\.(?:mp4|webm|mkv|avi|mov|m4v)'
-    match = re.search(url_pattern, text, re.IGNORECASE)
-    if match:
-        return match.group(0)
-    
-    return None
+        yield sse_error(f"Podcast clip agent error: {e}")

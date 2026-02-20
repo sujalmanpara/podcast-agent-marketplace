@@ -78,7 +78,8 @@ async def transcribe_audio(
     except RuntimeError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Transcription error: {str(e)}")
+        error_msg = str(e) if str(e) else f"{type(e).__name__} (no message)"
+        raise RuntimeError(f"Transcription error: {error_msg}")
     finally:
         if os.path.exists(audio_file):
             os.remove(audio_file)

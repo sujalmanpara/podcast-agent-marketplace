@@ -1,21 +1,4 @@
-# Environment variables (contains API keys)
-.env
-
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-
-# Test output
-output/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
+*.pyc
+.env
+node_modules/

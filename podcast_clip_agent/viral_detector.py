@@ -1,10 +1,13 @@
 """
-Viral Moment Detector - Uses GPT-4o-mini to find the most engaging clips.
+Viral Moment Detector - Uses AI to find the most engaging clips.
+Supports OpenAI (GPT-4o), Anthropic (Claude), and Google (Gemini).
 Analyzes transcript segments and returns ranked, shareable moments.
 """
 import httpx
 import json
 import re
+
+from .llm_service import call_llm
 
 
 async def detect_viral_moments(
@@ -14,19 +17,26 @@ async def detect_viral_moments(
     num_clips: int = 3,
     min_duration: int = 15,
     max_duration: int = 60,
-    threshold: float = 7.0
+    threshold: float = 7.0,
+    provider: str = "openai",
+    model: str = None
 ) -> list:
     """
     Detect viral moments in transcript using LLM.
 
     Args:
         client: httpx.AsyncClient
-        api_key: OpenAI API key
+        api_key: API key for the LLM provider
         transcript: {"text": "...", "segments": [{start, end, text}, ...]}
         num_clips: Number of clips to extract
         min_duration: Minimum clip duration (seconds)
         max_duration: Maximum clip duration (seconds)
         threshold: Minimum virality score 1-10
+        provider: LLM provider - "openai", "anthropic", or "google" (default: "openai")
+        model: Specific model name (optional, uses provider defaults)
+               - OpenAI: gpt-4o (default), gpt-4o-mini, gpt-4-turbo
+               - Anthropic: claude-sonnet-4 (default), claude-opus-4
+               - Google: gemini-2.0-flash-thinking-exp-1219 (default), gemini-2.0-flash-exp
 
     Returns:
         [
@@ -81,33 +91,17 @@ Only include clips with score >= {threshold}/10."""
     )
 
     try:
-        response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "temperature": 0.3,
-                "max_tokens": 16000,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-            },
-            timeout=60
+        # Call LLM (unified interface for OpenAI, Anthropic, Google)
+        result_text = await call_llm(
+            client=client,
+            provider=provider,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            max_tokens=16000,
+            temperature=0.3
         )
-
-        if response.status_code != 200:
-            error_detail = response.text[:200]
-            if response.status_code == 401:
-                raise RuntimeError("Invalid OpenAI API key")
-            else:
-                raise RuntimeError(f"OpenAI API error ({response.status_code}): {error_detail}")
-
-        data = response.json()
-        result_text = data["choices"][0]["message"]["content"]
 
         moments = _parse_llm_response(result_text)
 

@@ -131,13 +131,35 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
             )
             return
 
-        # ── API keys ──────────────────────────────────────────────────────
-        openai_api_key = keys.get("OPENAI_API_KEY")
-        whisper_key    = keys.get("OPENAI_WHISPER_KEY", openai_api_key)
-
-        if not openai_api_key:
-            yield sse_error("OPENAI_API_KEY is required for viral moment detection.")
+        # ── API keys & LLM configuration ──────────────────────────────────
+        
+        # LLM provider selection (openai, anthropic, or google)
+        llm_provider = keys.get("LLM_PROVIDER", "openai").lower()
+        llm_model = keys.get("LLM_MODEL")  # Optional, uses provider defaults if not set
+        
+        # Get API key for selected provider
+        llm_api_key = None
+        if llm_provider == "openai":
+            llm_api_key = keys.get("OPENAI_API_KEY")
+            if not llm_api_key:
+                yield sse_error("OPENAI_API_KEY is required when LLM_PROVIDER=openai (or default)")
+                return
+        elif llm_provider == "anthropic":
+            llm_api_key = keys.get("ANTHROPIC_API_KEY")
+            if not llm_api_key:
+                yield sse_error("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
+                return
+        elif llm_provider == "google":
+            llm_api_key = keys.get("GOOGLE_API_KEY")
+            if not llm_api_key:
+                yield sse_error("GOOGLE_API_KEY is required when LLM_PROVIDER=google")
+                return
+        else:
+            yield sse_error(f"Invalid LLM_PROVIDER: {llm_provider}. Use 'openai', 'anthropic', or 'google'")
             return
+        
+        # Whisper key (always OpenAI for transcription)
+        whisper_key = keys.get("OPENAI_WHISPER_KEY")
         if not whisper_key:
             yield sse_error("OPENAI_WHISPER_KEY is required for transcription.")
             return
@@ -205,16 +227,19 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                     return
 
                 # Step 3 — Viral detection
-                yield sse_event("status", f"🤖 Analysing transcript for top {num_clips} viral moments…")
+                model_info = llm_model or f"{llm_provider} (default)"
+                yield sse_event("status", f"🤖 Analysing transcript for top {num_clips} viral moments with {model_info}…")
                 try:
                     viral_moments = await detect_viral_moments(
                         client,
-                        openai_api_key,
+                        llm_api_key,
                         transcript,
                         num_clips=num_clips,
                         min_duration=min_duration,
                         max_duration=max_duration,
-                        threshold=virality_threshold
+                        threshold=virality_threshold,
+                        provider=llm_provider,
+                        model=llm_model
                     )
                     if not viral_moments:
                         yield sse_error(
@@ -246,7 +271,7 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                     yield sse_event("status", "📝 Generating & burning captions in parallel…")
                     try:
                         clips = await generate_captions_for_clips(
-                            client, openai_api_key, clips, transcript
+                            client, llm_api_key, clips, transcript, provider=llm_provider, model=llm_model
                         )
                         ok = sum(1 for c in clips if c.get("has_captions"))
                         if ok == len(clips):

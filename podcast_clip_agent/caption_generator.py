@@ -14,14 +14,20 @@ async def generate_captions_for_clips(
     client: httpx.AsyncClient,
     api_key: str,
     clips: list,
-    transcript: dict
+    transcript: dict,
+    provider: str = "openai",
+    model: str = None
 ) -> list:
     """
     Generate and burn captions into video clips (in parallel).
 
     Args:
         client: httpx.AsyncClient (reserved for future AI caption styling)
-        api_key: OpenAI API key (reserved for future use)
+        api_key: LLM API key (reserved for future use)
+        clips: List of clip dictionaries
+        transcript: Full transcript with segments
+        provider: LLM provider (reserved for future use)
+        model: LLM model (reserved for future use)
         clips: List of clip dictionaries
         transcript: Full transcript with segments
 

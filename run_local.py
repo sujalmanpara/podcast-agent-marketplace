@@ -143,12 +143,15 @@ async def run_pipeline(
             # Step 6 — Copy to output
             log("📁", f"Saving clips to ./{output_dir}/")
             for clip in clips:
+                # In run_local, we are bypassing the executor endpoint, so files are still on disk here
                 src = Path(clip["file_path"])
                 if src.exists():
                     dst = output_path / src.name
                     shutil.copy2(str(src), str(dst))
                     size_mb = dst.stat().st_size / (1024 * 1024)
                     print(f"     → {dst.name}  ({size_mb:.1f} MB)")
+                else:
+                    print(f"     → Error: {src.name} not found")
 
     finally:
         # Clean up temp files
@@ -187,12 +190,12 @@ def main():
         print("❌ Could not find a valid video URL. Provide a YouTube or direct video link.")
         sys.exit(1)
 
-    # Validate API keys
-    openai_key  = os.getenv("OPENAI_API_KEY")
-    whisper_key = os.getenv("OPENAI_WHISPER_KEY", openai_key)
+    # ── Keys ──────────────────────────────────────────────────────────────────
+    openai_key = os.getenv("OPENAI_API_KEY")
+    whisper_key = openai_key  # Use the same key for transcription
 
     if not openai_key:
-        print("❌ OPENAI_API_KEY not found. Set it in .env or export it.")
+        print("❌ Error: OPENAI_API_KEY is required in .env or environment.", file=sys.stderr)
         sys.exit(1)
 
     # Check dependencies

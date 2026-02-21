@@ -155,9 +155,9 @@ async def _burn_captions_async(video_file: str, srt_file: str, output_file: str)
         abs_srt_ffmpeg = abs_srt.replace(":", "\\:").replace(" ", "\\ ")
 
     style = (
-        "FontSize=24,PrimaryColour=&Hffffff,"
+        "FontSize=8,PrimaryColour=&Hffffff,"
         "OutlineColour=&H000000,BorderStyle=3,Outline=2,"
-        "Shadow=0,MarginV=40,Alignment=2"
+        "Shadow=0,MarginV=20,Alignment=2"
     )
 
     vf = f"subtitles='{abs_srt_ffmpeg}':force_style='{style}'"

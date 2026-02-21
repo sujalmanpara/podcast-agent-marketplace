@@ -7,10 +7,9 @@
   "category": "content-creation",
   "tags": ["podcast", "video-editing", "clips", "viral-content", "youtube", "ai-captions", "multi-llm"],
   "requiredEnv": [
-    "OPENAI_WHISPER_KEY"
+    "OPENAI_API_KEY"
   ],
   "optionalEnv": [
-    "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "GOOGLE_API_KEY",
     "LLM_PROVIDER",

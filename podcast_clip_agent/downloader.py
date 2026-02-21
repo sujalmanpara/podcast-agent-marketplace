@@ -28,12 +28,12 @@ async def download_video(url: str, output_dir: str) -> str:
     output_template = str(output_path / "video.%(ext)s")
 
     cmd = [
-        "yt-dlp",
-        "--format", "best[ext=mp4]/best",
+        "python", "-m", "yt_dlp",
+        "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+        "--merge-output-format", "mp4",
+        "--extractor-args", "youtube:player_client=android",
         "--output", output_template,
         "--no-playlist",
-        "--quiet",
-        "--no-warnings",
         url
     ]
 

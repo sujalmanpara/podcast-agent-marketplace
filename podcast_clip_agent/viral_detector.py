@@ -68,7 +68,7 @@ Look for:
 
 Each clip must be {min_duration}-{max_duration} seconds long.
 
-Return JSON array (no markdown, just valid JSON):
+Return JSON array (no markdown, just valid JSON). Do NOT include trailing commas. Ensure all strings are properly escaped:
 [
   {{
     "start_time": 45.2,
@@ -221,8 +221,23 @@ def _parse_llm_response(text: str) -> list:
         except json.JSONDecodeError:
             pass
 
+    # Attempt 3: Try to salvage truncated JSON
+    if text.startswith("["):
+        for suffix in ['"]}]', '"}]', '}]', ']']:
+            try:
+                salvaged = json.loads(text + suffix)
+                if isinstance(salvaged, list) and len(salvaged) > 0:
+                    # Filter out any totally empty/broken items left by the truncation
+                    clean = [m for m in salvaged if isinstance(m, dict) and "start_time" in m]
+                    if clean:
+                        return clean
+            except json.JSONDecodeError:
+                pass
+
     # Give up with a helpful error
     preview = text[:200] + "..." if len(text) > 200 else text
+    with open("bad_json.txt", "w", encoding="utf-8") as f:
+        f.write(text)
     raise RuntimeError(
         f"LLM returned invalid JSON. Response preview: {preview}\n\n"
         f"Expected JSON array format: [{{'start_time': ..., 'end_time': ..., ...}}]"

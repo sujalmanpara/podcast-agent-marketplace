@@ -13,10 +13,9 @@ Convert long-form podcasts into viral short-form clips with AI-powered scene det
 
 ## Setup
 
-Set these environment variables:
+Set this environment variable:
 
-- **OPENAI_API_KEY** - For AI viral moment detection (GPT-4o-mini)
-- **OPENAI_WHISPER_KEY** - For audio transcription (Whisper API, can be same as above)
+- **OPENAI_API_KEY** - For AI viral moment detection (GPT-4) and audio transcription (Whisper)
 
 ## How to Execute
 
@@ -24,7 +23,6 @@ Set these environment variables:
 curl -s -X POST https://marketplacebackend-production-58c8.up.railway.app/v1/agents/podcast-clip-agent/execute \
   -H "Content-Type: application/json" \
   -H "X-User-LLM-Key: YOUR_OPENAI_KEY" \
-  -H "X-Key-OPENAI_WHISPER_KEY: YOUR_OPENAI_KEY" \
   -d '{
     "prompt": "Create 3 viral clips from https://youtube.com/watch?v=dQw4w9WgXcQ",
     "language": "en",

@@ -173,13 +173,16 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
         llm_provider = keys.get("LLM_PROVIDER", "openai").lower()
         llm_model = keys.get("LLM_MODEL")  # Optional, uses provider defaults if not set
         
-        # Get API key for selected provider
+        # Whisper key (always OpenAI for transcription)
+        whisper_key = keys.get("OPENAI_API_KEY")
+        if not whisper_key:
+            yield sse_error("OPENAI_API_KEY is required for audio transcription.")
+            return
+
+        # Get API key for selected LLM provider
         llm_api_key = None
         if llm_provider == "openai":
-            llm_api_key = keys.get("OPENAI_API_KEY")
-            if not llm_api_key:
-                yield sse_error("OPENAI_API_KEY is required when LLM_PROVIDER=openai (or default)")
-                return
+            llm_api_key = whisper_key  # Can reuse the same key
         elif llm_provider == "anthropic":
             llm_api_key = keys.get("ANTHROPIC_API_KEY")
             if not llm_api_key:
@@ -192,12 +195,6 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                 return
         else:
             yield sse_error(f"Invalid LLM_PROVIDER: {llm_provider}. Use 'openai', 'anthropic', or 'google'")
-            return
-        
-        # Whisper key (always OpenAI for transcription)
-        whisper_key = keys.get("OPENAI_WHISPER_KEY")
-        if not whisper_key:
-            yield sse_error("OPENAI_WHISPER_KEY is required for transcription.")
             return
 
         # ── Options validation ────────────────────────────────────────────
@@ -403,14 +400,25 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                     except Exception as e:
                         yield sse_event("status", f"⚠️ Caption step failed, skipping: {e}")
 
-                # Step 6 — Final result
+                # Step 6 — Base64 Encode & Final result
+                yield sse_event("status", "📦 Encoding clips for transfer (base64)…")
+                import base64
+                for clip in clips:
+                    try:
+                        with open(clip["file_path"], "rb") as f:
+                            clip["base64_data"] = base64.b64encode(f.read()).decode('utf-8')
+                        clip["file_name"] = Path(clip["file_path"]).name
+                        # Remove the local physical path as the folder will be deleted soon
+                        clip.pop("file_path", None)
+                    except Exception as e:
+                        clip["base64_error"] = str(e)
+                
                 yield sse_event("result", {
                     "success":   True,
                     "video_url": video_url,
                     "num_clips": len(clips),
                     "clips":     clips,
-                    "message":   f"✅ Successfully created {len(clips)} viral clips!",
-                    "note":      "Clips are temporary — download within 1 hour."
+                    "message":   f"✅ Successfully created {len(clips)} viral clips!"
                 })
 
     except Exception as e:

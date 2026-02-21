@@ -53,6 +53,42 @@ def _check_dependencies() -> tuple[bool, list[str]]:
 # URL extraction
 # ---------------------------------------------------------------------------
 
+async def _get_video_duration(video_path: str) -> float:
+    """
+    Get video duration in seconds using ffprobe.
+    
+    Args:
+        video_path: Path to video file
+    
+    Returns:
+        Duration in seconds
+    
+    Raises:
+        RuntimeError: If ffprobe fails
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            raise RuntimeError(f"ffprobe failed: {stderr.decode()[:200]}")
+        
+        duration = float(stdout.decode().strip())
+        return duration
+    
+    except Exception as e:
+        raise RuntimeError(f"Failed to get video duration: {str(e)}")
+
+
 def _extract_url(text: str) -> str | None:
     """
     Extract a video URL from free-form text.
@@ -213,6 +249,50 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                 except Exception as e:
                     yield sse_error(f"Download failed: {e}")
                     return
+                
+                # Step 1.5 — Get video duration and auto-adjust clip lengths
+                try:
+                    video_duration = await _get_video_duration(video_file)
+                    minutes = int(video_duration // 60)
+                    seconds = int(video_duration % 60)
+                    
+                    yield sse_event("status", f"📹 Video duration: {minutes}:{seconds:02d}")
+                    
+                    # Auto-adjust min_duration based on video length
+                    original_min = min_duration
+                    original_max = max_duration
+                    
+                    if video_duration < 60:
+                        # Short video (<1 min) → Allow shorter clips (10s min)
+                        min_duration = max(10, min(min_duration, 15))
+                        max_duration = min(max_duration, 30)  # Cap at 30s for short videos
+                        yield sse_event("status", f"⚙️  Short video detected → Adjusted clip length: {min_duration}-{max_duration}s")
+                    
+                    elif video_duration < 300:
+                        # Medium video (1-5 min) → Standard clips (15-60s)
+                        min_duration = max(15, min_duration)
+                        yield sse_event("status", f"⚙️  Medium video detected → Clip length: {min_duration}-{max_duration}s")
+                    
+                    else:
+                        # Long video (>5 min) → Longer clips for better context (20-60s)
+                        min_duration = max(20, min_duration)
+                        max_duration = max(30, max_duration)  # At least 30s max for long videos
+                        yield sse_event("status", f"⚙️  Long video detected → Clip length: {min_duration}-{max_duration}s")
+                    
+                    # Ensure min < max
+                    if min_duration >= max_duration:
+                        max_duration = min_duration + 15
+                    
+                    # Notify if adjusted
+                    if min_duration != original_min or max_duration != original_max:
+                        yield sse_event("status", 
+                            f"ℹ️  Auto-adjusted from {original_min}-{original_max}s → {min_duration}-{max_duration}s"
+                        )
+                
+                except Exception as e:
+                    # Non-fatal: Continue with user-specified durations
+                    yield sse_event("status", f"⚠️  Could not detect video duration, using defaults: {e}")
+                    pass
 
                 # Step 2 — Transcribe
                 yield sse_event("status", "🎤 Transcribing audio with Whisper… (1-3 min)")

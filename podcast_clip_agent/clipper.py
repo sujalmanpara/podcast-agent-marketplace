@@ -58,6 +58,7 @@ async def create_clips_from_moments(
         end_time = moment.get("end_time", 0)
         duration = end_time - start_time
         if duration <= 0:
+            print(f"⚠️  Skipping clip {i + 1}: invalid duration ({start_time:.1f}s → {end_time:.1f}s)")
             continue
 
         clip_id = str(uuid.uuid4())[:8]

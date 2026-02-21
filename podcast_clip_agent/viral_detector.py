@@ -111,11 +111,44 @@ Only include clips with score >= {threshold}/10."""
 
         moments = _parse_llm_response(result_text)
 
-        # Apply virality threshold and cap at requested count
-        moments = [m for m in moments if m.get("score", 0) >= threshold]
-        moments = moments[:num_clips]
-
-        return moments
+        # Validate and filter moments
+        valid_moments = []
+        for m in moments:
+            start = m.get("start_time", 0)
+            end = m.get("end_time", 0)
+            duration = end - start
+            score = m.get("score", 0)
+            
+            # Skip invalid moments
+            if start < 0 or end <= start:
+                continue
+            
+            # Skip moments shorter than min_duration
+            if duration < min_duration:
+                continue
+            
+            # Skip moments longer than max_duration
+            if duration > max_duration:
+                continue
+            
+            # Skip moments below threshold
+            if score < threshold:
+                continue
+            
+            valid_moments.append(m)
+        
+        # Cap at requested number of clips
+        valid_moments = valid_moments[:num_clips]
+        
+        # Ensure we have at least some valid moments
+        if not valid_moments:
+            raise RuntimeError(
+                f"LLM returned {len(moments)} moments, but none were valid "
+                f"({min_duration}-{max_duration}s duration, score >= {threshold}). "
+                f"Try lowering virality_threshold or adjusting duration constraints."
+            )
+        
+        return valid_moments
 
     except httpx.TimeoutException:
         raise RuntimeError("LLM timeout. Try a shorter transcript.")

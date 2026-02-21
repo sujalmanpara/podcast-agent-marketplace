@@ -258,36 +258,55 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
                     
                     yield sse_event("status", f"📹 Video duration: {minutes}:{seconds:02d}")
                     
-                    # Auto-adjust min_duration based on video length
+                    # Auto-adjust based on video length
                     original_min = min_duration
                     original_max = max_duration
+                    original_num_clips = num_clips
                     
                     if video_duration < 60:
-                        # Short video (<1 min) → Allow shorter clips (10s min)
+                        # Short video (<1 min) → 1-2 clips, shorter durations
                         min_duration = max(10, min(min_duration, 15))
-                        max_duration = min(max_duration, 30)  # Cap at 30s for short videos
-                        yield sse_event("status", f"⚙️  Short video detected → Adjusted clip length: {min_duration}-{max_duration}s")
+                        max_duration = min(max_duration, 30)
+                        recommended_clips = 1 if video_duration < 30 else 2
+                        num_clips = min(num_clips, recommended_clips)
+                        yield sse_event("status", f"⚙️  Short video → {num_clips} clips, {min_duration}-{max_duration}s each")
                     
                     elif video_duration < 300:
-                        # Medium video (1-5 min) → Standard clips (15-60s)
+                        # Medium video (1-5 min) → 2-4 clips, standard durations
                         min_duration = max(15, min_duration)
-                        yield sse_event("status", f"⚙️  Medium video detected → Clip length: {min_duration}-{max_duration}s")
+                        recommended_clips = min(4, max(2, int(video_duration / 90)))  # ~1 clip per 90s
+                        num_clips = max(min(num_clips, recommended_clips), 2)  # At least 2 clips
+                        yield sse_event("status", f"⚙️  Medium video → {num_clips} clips, {min_duration}-{max_duration}s each")
+                    
+                    elif video_duration < 900:
+                        # Long video (5-15 min) → 3-6 clips
+                        min_duration = max(20, min_duration)
+                        max_duration = max(30, max_duration)
+                        recommended_clips = min(6, max(3, int(video_duration / 150)))  # ~1 clip per 2.5 min
+                        num_clips = max(min(num_clips, recommended_clips), 3)  # At least 3 clips
+                        yield sse_event("status", f"⚙️  Long video → {num_clips} clips, {min_duration}-{max_duration}s each")
                     
                     else:
-                        # Long video (>5 min) → Longer clips for better context (20-60s)
+                        # Very long video (>15 min) → 5-10 clips
                         min_duration = max(20, min_duration)
-                        max_duration = max(30, max_duration)  # At least 30s max for long videos
-                        yield sse_event("status", f"⚙️  Long video detected → Clip length: {min_duration}-{max_duration}s")
+                        max_duration = max(35, max_duration)
+                        recommended_clips = min(10, max(5, int(video_duration / 180)))  # ~1 clip per 3 min
+                        num_clips = max(min(num_clips, recommended_clips), 5)  # At least 5 clips
+                        yield sse_event("status", f"⚙️  Very long video → {num_clips} clips, {min_duration}-{max_duration}s each")
                     
                     # Ensure min < max
                     if min_duration >= max_duration:
                         max_duration = min_duration + 15
                     
-                    # Notify if adjusted
+                    # Notify adjustments
+                    adjustments = []
+                    if num_clips != original_num_clips:
+                        adjustments.append(f"clips: {original_num_clips} → {num_clips}")
                     if min_duration != original_min or max_duration != original_max:
-                        yield sse_event("status", 
-                            f"ℹ️  Auto-adjusted from {original_min}-{original_max}s → {min_duration}-{max_duration}s"
-                        )
+                        adjustments.append(f"duration: {original_min}-{original_max}s → {min_duration}-{max_duration}s")
+                    
+                    if adjustments:
+                        yield sse_event("status", f"ℹ️  Auto-adjusted {', '.join(adjustments)}")
                 
                 except Exception as e:
                     # Non-fatal: Continue with user-specified durations
@@ -308,19 +327,42 @@ async def execute(prompt: str, keys: dict, language: str = None, options: dict =
 
                 # Step 3 — Viral detection
                 model_info = llm_model or f"{llm_provider} (default)"
-                yield sse_event("status", f"🤖 Analysing transcript for top {num_clips} viral moments with {model_info}…")
+                
+                # Request more moments than needed for better quality (filter to best)
+                # For short videos: request exactly what we need
+                # For longer videos: request 1.5-2x to ensure quality
+                llm_requested_clips = num_clips
+                if video_duration > 900:  # > 15 min
+                    llm_requested_clips = min(20, int(num_clips * 2))  # Request 2x for very long videos
+                elif video_duration > 300:  # > 5 min
+                    llm_requested_clips = min(15, int(num_clips * 1.5))  # Request 50% more
+                
+                yield sse_event("status", 
+                    f"🤖 Analysing transcript for top {llm_requested_clips} moments with {model_info}…"
+                )
+                
                 try:
                     viral_moments = await detect_viral_moments(
                         client,
                         llm_api_key,
                         transcript,
-                        num_clips=num_clips,
+                        num_clips=llm_requested_clips,  # Request more for filtering
                         min_duration=min_duration,
                         max_duration=max_duration,
                         threshold=virality_threshold,
                         provider=llm_provider,
                         model=llm_model
                     )
+                    
+                    # Filter to best clips (top N by score)
+                    if len(viral_moments) > num_clips:
+                        viral_moments = sorted(viral_moments, key=lambda m: m.get("score", 0), reverse=True)
+                        viral_moments = viral_moments[:num_clips]
+                        yield sse_event("status", 
+                            f"✅ Found {len(viral_moments)} viral moments (filtered from {llm_requested_clips})"
+                        )
+                    else:
+                        yield sse_event("status", f"✅ Found {len(viral_moments)} viral moments")
                     if not viral_moments:
                         yield sse_error(
                             "No viral moments found. "
